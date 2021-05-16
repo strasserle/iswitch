@@ -39,28 +39,28 @@ import pickle
 ## parser
 
 def detect_iswitches(pheno="iswitch\\data\\TCGA_phenotype_denseDataOnlyDownload.tsv.gz",
-                     Data_tsv="iswitch\\data\\tcga_Kallisto_tpm.gz",
-                     ctypeGiven="iswitch\\kidney-clear-cell-carcinoma",
-                     annotation_file="iswitch\\data\\gencode.v23.annotation.transcript.probemap"):
+                     data="iswitch\\data\\tcga_Kallisto_tpm.gz",
+                     disease="iswitch\\kidney-clear-cell-carcinoma",
+                     anno="iswitch\\data\\gencode.v23.annotation.transcript.probemap"):
 
     # # path to phenotype tsv file
     # pheno = sys.argv[1]
     #
     # # # path to tsv file
-    # Data_tsv = sys.argv[2]
+    # data = sys.argv[2]
     #
     # # # name of the cancer type
-    # ctypeGiven = sys.argv[3].replace("-", " ")
+    # disease = sys.argv[3].replace("-", " ")
     #
     # # # path to annotation file
-    # annotation_file = sys.argv[4]
+    # anno = sys.argv[4]
 
     # pheno = "data\\TCGA_phenotype_denseDataOnlyDownload.tsv.gz"
-    # Data_tsv = "data\\tcga_Kallisto_tpm.gz"
-    # annotation_file = "data\\gencode.v23.annotation.transcript.probemap"
-    # ctypeGiven = "kidney-clear-cell-carcinoma" # "thyroid carcinoma"
+    # data = "data\\tcga_Kallisto_tpm.gz"
+    # anno = "data\\gencode.v23.annotation.transcript.probemap"
+    # disease = "kidney-clear-cell-carcinoma" # "thyroid carcinoma"
 
-    ctypeGiven = ctypeGiven.replace("-", " ")
+    disease = disease.replace("-", " ")
 
 
     ## params
@@ -80,7 +80,7 @@ def detect_iswitches(pheno="iswitch\\data\\TCGA_phenotype_denseDataOnlyDownload.
     phenotype = pd.read_csv(pheno, sep="\t", compression="gzip")
 
     # select samples for given cancer type
-    phenotype = phenotype[phenotype._primary_disease == ctypeGiven]
+    phenotype = phenotype[phenotype._primary_disease == disease]
 
     # select ids for tumor samples
     cases = pd.DataFrame({"sampleID": phenotype["sample"][phenotype.sample_type_id == 1], "condition": "case"})
@@ -95,7 +95,7 @@ def detect_iswitches(pheno="iswitch\\data\\TCGA_phenotype_denseDataOnlyDownload.
     ## check which samples are also in tpm file
 
     # read header from tpm file
-    all_samples = pd.read_csv(Data_tsv, sep="\t", nrows=0)
+    all_samples = pd.read_csv(data, sep="\t", nrows=0)
 
     # extract ids
     all_samples = all_samples.columns.to_list()[1:]
@@ -114,7 +114,7 @@ def detect_iswitches(pheno="iswitch\\data\\TCGA_phenotype_denseDataOnlyDownload.
     # https://xenabrowser.net/datapages/?dataset=tcga_Kallisto_tpm&host=https%3A%2F%2Ftoil.xenahubs.net&removeHub=https%3A%2F%2Fxena.treehouse.gi.ucsc.edu%3A443
 
     # read needed columns (samples) from tpm file
-    abundance = pd.read_csv(Data_tsv, sep="\t", compression = "gzip", usecols=lambda x: x in set(["sample"] + needed_samples))
+    abundance = pd.read_csv(data, sep="\t", compression = "gzip", usecols=lambda x: x in set(["sample"] + needed_samples))
 
     # rename columns
     abundance.columns = ['isoform_id']+[x for x in abundance.columns[1:]]
@@ -129,7 +129,7 @@ def detect_iswitches(pheno="iswitch\\data\\TCGA_phenotype_denseDataOnlyDownload.
         print('Step 1 of 6: Obtaining annotation...')
 
     # read file
-    annotation = pd.read_csv(annotation_file, sep="\t")
+    annotation = pd.read_csv(anno, sep="\t")
 
     # select columns
     annotation = annotation[["id", "gene"]]
@@ -374,7 +374,7 @@ def detect_iswitches(pheno="iswitch\\data\\TCGA_phenotype_denseDataOnlyDownload.
 
     for i in range(len(myDiffData2List)):
 
-        myDiffData2List[i].to_csv("ISA_" + ctypeGiven + "_" + str(i) + "_output.csv", index = False)
+        myDiffData2List[i].to_csv("ISA_" + disease + "_" + str(i) + "_output.csv", index = False)
 
 
 
@@ -386,7 +386,7 @@ def detect_iswitches(pheno="iswitch\\data\\TCGA_phenotype_denseDataOnlyDownload.
 
     switches = pd.DataFrame()
     for i in range(len(myDiffData2List)):
-        other = pd.read_csv("ISA_Result\ISA_" + ctypeGiven + "_" + str(i) + "_output.csv")
+        other = pd.read_csv("ISA_Result\ISA_" + disease + "_" + str(i) + "_output.csv")
         switches = switches.append(other)
 
     # significant switches
@@ -428,22 +428,26 @@ def detect_iswitches(pheno="iswitch\\data\\TCGA_phenotype_denseDataOnlyDownload.
             switch_pairs = switch_pairs.append(iso_pair)
 
     # write file
-    switch_pairs.to_csv(ctypeGiven.replace(" ", "-") + "_" + "isoformSwitchAnalyzePy.tsv", sep="\t", index = False)
+    switch_pairs.to_csv(disease.replace(" ", "-") + "_" + "isoformSwitchAnalyzePy.tsv", sep="\t", index = False)
+
+    # # Part 4: Summarize and visualize output
+    summarize_iswitches(switches, switch_pairs, alpha, dIFcutoff)
 
     return switches, switch_pairs
 
 
 ### Part 4: Summarize and visualize output 
-############################################ 
+############################################
+
+ # colors
+ #    controlcolor = "darkgrey"
+ #    casecolor = "dimgrey"
+ #    spada_light = "#9acd9a"
+ #    spada_dark = "#438943"
+ #    isa_light = '#9a9aff'
+ #    isa_dark = "#4d4dff"
 
 def summarize_iswitches(switches, switch_pairs, alpha, dIFcutoff):
-    # colors
-    controlcolor = "darkgrey"
-    casecolor = "dimgrey"
-    spada_light = "#9acd9a"
-    spada_dark = "#438943"
-    isa_light = '#9a9aff'
-    isa_dark = "#4d4dff"
 
     # all isoforms with a significant change in isoform usage
     signif_switches = switches[(switches.isoform_switch_q_value < alpha) & (abs(switches.dIF) > dIFcutoff)].isoform_id
@@ -494,7 +498,7 @@ def summarize_iswitches(switches, switch_pairs, alpha, dIFcutoff):
 
 ## plot example genes
 
-def example_plot_switches(gene_id, switch_pair_df, switches, casecolor, controlcolor):
+def example_plot_switches(gene_id, switch_pair_df, switches, casecolor="dimgrey", controlcolor="darkgrey"):
     pairs = switch_pair_df[switch_pair_df.Symbol == gene_id]
     isos = set(pairs.Control_transcript)
     isos.update(set(pairs.Case_transcript))
@@ -517,7 +521,7 @@ def example_plot_switches(gene_id, switch_pair_df, switches, casecolor, controlc
     plt.savefig(f'ISA_example_plot_{gene_id}.png')
 
 
-def example_plot_switches_reordered(gene_id, switch_pair_df, switches, casecolor, controlcolor):
+def example_plot_switches_reordered(gene_id, switch_pair_df, switches, casecolor="dimgrey", controlcolor="darkgrey"):
     pairs = switch_pair_df[switch_pair_df.Symbol == gene_id]
     isos_case = pairs.Case_transcript
     isos_control = pairs.Control_transcript

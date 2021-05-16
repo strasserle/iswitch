@@ -6,7 +6,7 @@ not yet published
 
 to install it locally, clone it from github: 
 
-    git clone strasserle/iswitch
+    git clone https://github.com/strasserle/iswitch
     
 change into the outer folder 'iswitch' and install the package:
 

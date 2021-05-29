@@ -1,4 +1,3 @@
-<<<<<<< HEAD:iswitchpy/isoform_switch_analyzer.py
 import pandas as pd
 import numpy as np
 import warnings

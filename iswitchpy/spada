@@ -1,0 +1,182 @@
+#!C:\Users\stras\anaconda3\envs\iswitch\python.exe
+
+from spada.methods import *
+from spada.io import io
+
+import argparse
+import logging
+
+parser = argparse.ArgumentParser(prog = "spada",
+				description = "Find significant alternative splicing switches. \
+							   Analyze their functional impact.")
+
+subparsers = parser.add_subparsers(help='sub-command help')
+
+expression_parser = argparse.ArgumentParser(add_help=False)
+expression_parser.add_argument('-co', '--expression-control', dest='controlExpression',
+							   action='store', default=None,
+							   help='Tab-separated table with transcript-level expression data of the control samples \
+							   in TPM; a row per annotated transcript, indicated in the first column. Sorting \
+							   by gene (i.e. transcripts from the same gene are in consecutive rows) will drastically \
+							   reduce memory usage.')
+expression_parser.add_argument('-ca', '--expression-case', dest='caseExpression',
+							   action='store', default=None,
+							   help='Equivalent to --expression-control for the case samples. Required for newly \
+							   generated networks.')
+expression_parser.add_argument('-m', '--minimum-expression', dest='minExpression',
+							   action='store', default=0.1, type=float,
+					 		   help='Minimum expression value, in TPM, to consider a transcript expressed.')
+
+network_parser = argparse.ArgumentParser(add_help=False)
+network_parser.add_argument('-a', '--annotation', dest='annotation', action='store', default='annotation.pklz',
+							help='Used annotation. Either the path to a spada annotation file (find already available at  \
+							https://github.com/hclimente/spada/wiki/Annotation-files); or an accepted annotation \
+							when generating your own via the init sub-command (ucsc, gencode, ensembl).')
+
+switch_parser = argparse.ArgumentParser(add_help=False)
+switch_parser.add_argument('-s', '--switches', dest='switchesFile', action='store',
+						   default=None, type=str, help='File containing switches as TSV.')
+
+################################################
+###   INITIALIZE THE NETWORKS               ####
+################################################
+def init(o):
+	c = create_network.CreateNetwork(o.case, o.annotation, o.new)
+	c.run(o.gtf, o.seq, o.ppi, o.ddi, o.features, o.aberrant)
+
+subparser_init = subparsers.add_parser('init', help='Create network.', parents=[network_parser])
+
+subparser_init.add_argument('-N', '--name', dest='case', action='store',
+							help='Identifier of the analysis e.g. the case type.')
+subparser_init.add_argument('-n', '--new', dest='new', action='store_true',
+							help='Use previous networks.', default=False)
+subparser_init.add_argument('-g', '--gtf', dest='gtf', action='store', default=None,
+							help='GFF with the gene, transcript, exon and CDS annotation.')
+subparser_init.add_argument('-p', '--ppi', dest='ppi', action='store', default=None,
+							help='File with protein-protein interactions, in PSI-MI TAB format >= 2.5. Required \
+							for newly generated networks.')
+subparser_init.add_argument('-d', '--ddi', dest='ddi', action='store', default=None,
+							help='Pairs of interacting domains, in TSV format with columns named Pfam1 and Pfam2. \
+							Required for newly generated networks.')
+subparser_init.add_argument('-s', '--seq', dest='seq', action='store', default=None,
+							help='Fasta file with the protein sequences of each transcript. Required for newly \
+							generated networks.')
+subparser_init.add_argument('-f', '--features', dest='features', action='store', default=None,
+							help='Tab-separated table with transcript-level features. Required for newly \
+							generated networks. Columns must be named Transcript, Feature_type, Feature, Start and End.')
+subparser_init.add_argument('-x', '--aberrant', dest='aberrant', action='store', default=None,
+							help='Tab-separated table containing gene-aberrant transcript pairs, in columns named GeneId \
+							and Transcript. The genes must be in the annotation, but not the transcripts. Hence, they \
+							do not have known genomic coordinates, exon structure or CDS. They can, however, present \
+							other features (protein sequence, expression, etc.).')
+
+subparser_init.set_defaults(func=init)
+
+################################################
+###   COMPUTE SWITCHES                      ####
+################################################
+def switches(o):
+	c = compute_switches.ComputeSwitches(o.annotation)
+	c.run(o.controlExpression, o.caseExpression, o.minExpression, 
+		  (1 - o.pSplicing) * 100, (1 - o.pDE) * 100)
+
+subparser_switches = subparsers.add_parser('switches', help='Detect switches.',
+										   parents=[expression_parser, network_parser])
+subparser_switches.add_argument('-s', '--p-splicing', dest='pSplicing',
+							   action='store', default=.05, type=float,
+					 		   help='Maximum p-value to call a significantly spliced transcript.')
+subparser_switches.add_argument('-d', '--p-de', dest='pDE',
+							   action='store', default=.05, type=float,
+					 		   help='Maximum p-value to call a significantlly differentially \
+									 expressed gene.')
+
+subparser_switches.set_defaults(func=switches)
+
+################################################
+###   STRUCTURAL ANALYSIS                   ####
+################################################
+def function(o):
+	g = get_switches.GetSwitches(o.annotation)
+	g.run(o.switchesFile)
+	s = structural_analysis.StructuralAnalysis((g._genes, g._txs), o.pfam, o.prosite, o.idr)
+	s.run()
+
+subparser_functional = subparsers.add_parser('function', help='Functional analysis of the switches.', parents = [network_parser, switch_parser])
+subparser_functional.add_argument('-P', '--pfam', dest='pfam', action='store_true',
+								  help='Search exclusively changes in Pfam domains.', default=False)
+subparser_functional.add_argument('-S', '--prosite', dest='prosite', action='store_true',
+								  help='Search exclusively changes in ProSite patterns.', default=False)
+subparser_functional.add_argument('-I', '--idr', dest='idr', action='store_true',
+								  help='Search exclusively changes in IDRs.', default=False)
+
+subparser_functional.set_defaults(func=function)
+
+################################################
+###   GET RANDOM SWITCHES                   ####
+################################################
+def simulate(o):
+	r = simulate_switches.SimulateSwitches(o.annotation)
+	r.run(o.controlExpression, o.caseExpression, o.rand, o.minExpression)
+
+subparser_sim = subparsers.add_parser('simulate', help='Simulate random switches.',
+									  parents=[expression_parser, network_parser])
+subparser_sim.add_argument('-r', '--rand', dest='rand', action='store',
+						   choices=['random','fix_expressed','fix_main'], default=None,
+						   help='How to generate the random switches. With \'random\', any pair of isoforms is possible. \
+						   With \'fix_expressed\', the control isoform will be the median most expressed transcript in \
+						   control cases, and the case isoform will be randomly picked amond the rest.')
+subparser_sim.set_defaults(func=simulate)
+
+################################################
+###   SWITCH SUMMARY	                    ####
+################################################
+def summarize(o):
+	g = get_switches.GetSwitches(o.annotation)
+	g.run(o.switchesFile)
+	s = summary.Summary((g._genes, g._txs))
+	s.run(o.controlExpression, o.caseExpression)
+
+subparser_summary = subparsers.add_parser('summary', help='Summary statistics of the switches.',
+										  parents=[expression_parser, network_parser, switch_parser])
+subparser_summary.set_defaults(func=summarize)
+
+################################################
+###   SWITCH GFF	                    ####
+################################################
+def make_gff(o):
+	g = get_switches.GetSwitches(o.annotation)
+	g.run(o.switchesFile)
+
+	logger.info('Writing GFF to switches_spada.gff')
+	io.printSwitchesToGff(g._genes, g._txs)
+
+subparser_gff = subparsers.add_parser('gff', help='Print the selected switches in to a GFF file.',
+									  parents=[network_parser, switch_parser])
+subparser_gff.set_defaults(func=make_gff)
+
+################################################
+###   MAIN                                  ####
+################################################
+params = parser.parse_args()
+
+if 'func' not in params:
+	print("No sub-command selected.")
+	parser.print_help()
+	exit()
+
+logging.basicConfig(level 	 = logging.INFO,
+					format 	 = '%(asctime)s %(name)-12s %(levelname)-8s %(message)s',
+				   	filename = 'spada_{}.log'.format(params.func.__name__), filemode='w')
+
+console = logging.StreamHandler()
+console.setLevel(logging.INFO)
+
+formatter = logging.Formatter('%(asctime)s: %(levelname)-8s %(message)s',
+							  datefmt = '%X',)
+console.setFormatter(formatter)
+logging.getLogger().addHandler(console)
+
+logger = logging.getLogger()
+logger.info("SPADA " + params.func.__name__)
+params.func(params)
+logger.info("All operations completed.")

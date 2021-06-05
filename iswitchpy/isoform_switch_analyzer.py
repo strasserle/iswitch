@@ -129,7 +129,7 @@ def detect_iswitches_spada(pheno, data, disease, anno, signif_threshold=0.3, qui
         # read needed columns (samples) from tpm file
         abundance = pd.read_csv(data, sep="\t", compression="gzip", usecols=lambda x: x in set(["sample"] + needed_samples), index_col=0)
 
-        switches = calculate_switches(abundance, anno, conditionMatrix, dis_ease)
+        switches = isoform_report("spada", abundance, anno, conditionMatrix, dis_ease)
 
     else:
         switches = pd.read_csv("switches" + dis_ease + ".csv")

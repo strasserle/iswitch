@@ -10,7 +10,7 @@ to install it locally, clone it from github:
     
 change into the outer folder 'iswitch' and install the package:
 
-    cd iswtich
+    cd iswitch
     pip install .
     
 ## Run example data

@@ -27,14 +27,13 @@ from statsmodels.stats.multitest import fdrcorrection
 
 # Decection of isoform switches
 
-
 def detect_iswitches(method="isa",
                      pheno="data/TCGA_phenotype_denseDataOnlyDownload.tsv.gz",
                      data="data/tcga_Kallisto_tpm.gz",
                      disease="kidney-clear-cell-carcinoma",
                      anno="data//gencode.v23.annotation.transcript.probemap",
                      quiet=False,
-                     *args):
+                     **kwargs):
     """ wrapper for isoforms swtich detection and analysis
 
     Parameters
@@ -55,183 +54,8 @@ def detect_iswitches(method="isa",
         parameters of the according isoform switch detection methods, eg signif_threshold for isa
     """
 
-    if method == "isa":
-        return detect_iswitches_isa(pheno, data, disease, anno, quiet)
-
-    elif method == "spada":
-        return detect_iswitches_spada(pheno, data, disease, anno, quiet, args)
-
-
-def detect_iswitches_spada(pheno, data, disease, anno, signif_threshold=0.3, quiet=False):
-    """ detect isoform switches with SPADA
-
-    Parameters
-    ------------
-    pheno: String
-        Tab separated gz file with a column "sample" and the according phenotype in a column called "primary_disease" as well as a column "sample_type_id" where a 1 denotes case samples and a 11 control samples. Note that this notation is inferred from TCGA.
-    data: String
-        Tab separated table where the columns represent the samples (same sample ids as in pheno) and the rows represent the isoforms (same ids as in annotation_file).
-    disease: String
-        The primary disease you are interested in.
-    anno: String
-        Tab separated file with the columns "id" and "gene" which give the gene id for each transcript.
-    signif_threshold: float
-        minimum fraction of samples
-    quiet: boold (default: False)
-        whether to suppress status messages
-    """
-
-    ## get case and control sample ids for the given cancer type
-
-    # read phenotype file
-    phenotype = pd.read_csv(pheno, sep="\t", compression="gzip")
-
-    # select samples for given cancer type
-    disease = disease.replace("-", " ")
-    phenotype = phenotype[phenotype._primary_disease == disease]
-
-    # select ids for tumor samples
-    cases = pd.DataFrame({"sampleID": phenotype["sample"][phenotype.sample_type_id == 1], "condition": "case"})
-
-    # select ids for solid tissue samples
-    controls = pd.DataFrame({"sampleID": phenotype["sample"][phenotype.sample_type_id == 11], "condition": "control"})
-
-    # create condition matrix for later usage
-    conditionMatrix = cases.append(controls)
-
-    ## check which samples are also in tpm file
-
-    # read header from tpm file
-    all_samples = pd.read_csv(data, sep="\t", nrows=0)
-
-    # extract ids
-    all_samples = all_samples.columns.to_list()[1:]
-
-    # select ids from the given cancer type (case and control)
-    needed_samples = [x for x in all_samples if x in conditionMatrix.sampleID.tolist()]
-    needed_cases = [x for x in cases.sampleID if x in needed_samples]
-    needed_controls = [x for x in controls.sampleID if x in needed_samples]
-
-    # check wheter spada expression input needs to be created from tpm matrix
-    dis_ease = disease.replace(" ", "_")
-    if not os.path.isfile(dis_ease + 'Case.tsv') or not os.path.isfile(dis_ease + 'Control.tsv'):
-
-        # read needed columns (samples) from tpm file
-        abundance = pd.read_csv(data, sep="\t", compression="gzip", usecols=lambda x: x in set(["sample"] + needed_samples),index_col=0, nrows=100)
-
-        # create input files for spada
-        case_expr = 2 ** abundance.loc[:, needed_cases] - 0.001
-        case_expr.to_csv(dis_ease + 'Case.tsv', sep='\t')
-        control_expr = 2 ** abundance.loc[:, needed_controls] - 0.001
-        control_expr.to_csv(dis_ease + 'Control.tsv', sep='\t')
-
-    elif not os.path.isfile("switches" + dis_ease + ".csv"):
-        # read needed columns (samples) from tpm file
-        abundance = pd.read_csv(data, sep="\t", compression="gzip", usecols=lambda x: x in set(["sample"] + needed_samples), index_col=0)
-
-        switches = isoform_report("spada", abundance, anno, conditionMatrix, dis_ease)
-
-    else:
-        switches = pd.read_csv("switches" + dis_ease + ".csv")
-
     if not quiet:
-        print("Starting SPADA run ...")
-
-    # run spada (script spada is in cwd, package spada needs to be installed
-    os.system('python spada switches --expression-control ' + dis_ease + 'Control.tsv '
-                                                                         '--expression-case ' + dis_ease + 'Case.tsv')
-
-    # read spada ouput, reformat for further usage:
-    spada_out = pd.read_csv("switches_spada.tsv", sep="\t")
-
-    # calculate whether significant
-    spada_out["frac"] = None
-    switch_dict = {}
-    for index, row in spada_out.iterrows():
-        sams = spada_out.at[index, 'Samples'].split(',')
-        symb = spada_out.at[index, 'Symbol']
-        ca = spada_out.at[index, 'Case_transcript']
-        co = spada_out.at[index, 'Control_transcript']
-        nbsams = len(sams)
-        frac = nbsams / len(needed_cases)
-        # fill frac column with correct fraction of supporting samples
-        spada_out['frac'][index] = frac
-        key = symb + '/' + co + '-' + ca
-        switch_dict[key] = frac
-
-    # filter df to only significant switches
-    # and write to tsv file again
-    significant = spada_out['frac'] >= signif_threshold
-    signSwitches = spada_out[significant]
-    out = signSwitches.to_csv(dis_ease + '_significantSwitches_spada.tsv', sep='\t', index=False)
-
-    switch_pairs = signSwitches[["GeneId", "Symbol", "Case_transcript", "Control_transcript"]]
-
-    # CREATE GENE REPORT
-    geneDf = signSwitches[['GeneId', 'Symbol']]
-    tupelList = geneDf.values.tolist()
-
-    geneList = []
-    # convert tupel list to glist: ['geneId1,symbol1', 'geneId2,symbol2',...]
-    for ge in tupelList:
-        g = ge[0]
-        s = ge[1]
-        ge = g + ',' + s
-        geneList.append(ge)
-
-    # print(geneList)
-
-    # create counter to get counts & retrieve desc. gene order
-    geneCounter = Counter(geneList)
-    orderedList = geneCounter.most_common(len(geneCounter.keys()))
-
-    # for el in orderedList:
-    #    print(el)
-
-    with open('geneReport.tsv', 'w+') as geneReport:
-        writer = csv.writer(geneReport, delimiter='\t')
-        h1 = 'Gene'
-        h2 = 'Symbol'
-        h3 = 'Number-of-switches'
-        writer.writerow([h1] + [h2] + [h3])
-        for g in orderedList:
-            writer.writerow([g[0].split(',')[0]] + [g[0].split(',')[1]] + [g[1]])
-
-    # case_trs = spada_out[["GeneId", "Case_transcript"]]
-    # control_trs = spada_out[["GeneId", "Control_transcript"]]
-    # switchlist = case_trs.append(control_trs, ignore_index=True)
-    # switches = pd.DataFrame({"gene_id": spada_out["GeneId"].append(spada_out["GeneId"]), "isoform_id": spada_out["Case_transcript"].append(spada_out["Control_transcript"])})
-
-    return switches, switch_pairs
-
-
-
-def detect_iswitches_isa(pheno, data, disease, anno, dIFcutoff=0.1, alpha=0.05, foldChangePseudoCount=0.01,
-                         quiet=False):
-    """ detect isoform switches with a python reimplementation of the IsoformSwitchAnalyzeR
-
-    Parameters
-    -------------
-    pheno: String
-        Tab separated gz file with a column "sample" and the according phenotype in a column called "primary_disease" as well as a column "sample_type_id" where a 1 denotes case samples and a 11 control samples. Note that this notation is inferred from TCGA.
-    data. String
-        Tab separated table where the columns represent the samples (same sample ids as in pheno) and the rows represent the isoforms (same ids as in annotation_file).
-    disease: String
-        The primary disease you are interested in.
-    anno: String
-        Tab separated file with the columns "id" and "gene" which give the gene id for each transcript.
-    dIFcutoff: float (default: 0.1)
-        cutoff for the dIF
-    alpha: float (default: 0.05)
-        cutoff for isoform switch q-value
-    foldChangePseudoCount: float (default: 0.01)
-        fold change pseudo count
-    quiet: boold (default: False)
-        whether to suppress status messages
-    """
-
-    if not quiet:
-        print("Starting ISA run ...")
+        print("Starting isoform switch detection...")
 
     ### Part 0: read files
     ######################################
@@ -243,8 +67,8 @@ def detect_iswitches_isa(pheno, data, disease, anno, dIFcutoff=0.1, alpha=0.05, 
 
     # select samples for given cancer type
     disease = disease.replace("-", " ")
+    dis_ease = disease.replace(" ", "_")
     phenotype = phenotype[phenotype._primary_disease == disease]
-    disease = disease.replace(" ", "_")
 
     # select ids for tumor samples
     cases = pd.DataFrame({"sampleID": phenotype["sample"][phenotype.sample_type_id == 1], "condition": "case"})
@@ -286,8 +110,7 @@ def detect_iswitches_isa(pheno, data, disease, anno, dIFcutoff=0.1, alpha=0.05, 
     ##  read annotation file to get the gene id for each isoform
 
     if not quiet:
-        print("CALCULATING ISOFORM FRACTIONS")
-        print('Step 1 of 6: Obtaining annotation...')
+        print('Obtaining annotation...')
 
     # read file
     annotation = pd.read_csv(anno, sep="\t")
@@ -298,158 +121,146 @@ def detect_iswitches_isa(pheno, data, disease, anno, dIFcutoff=0.1, alpha=0.05, 
     # rename columns
     annotation.columns = ["isoform_id", "gene_id"]
 
-    # add gene id to abundance matrix
-    abundance = abundance.merge(annotation, how='left', on="isoform_id")
-    # attention ! NANs !!!
+    # add gene id to abundance matrix, delete all unannotated isoforms
+    abundance = abundance.merge(annotation, how='inner', on="isoform_id")
 
     # print information about the given data
     initial_number_of_genes = len(abundance.gene_id.drop_duplicates())
     initial_number_of_isoforms = len(abundance.isoform_id)
     print("Number of genes in input: " + str(initial_number_of_genes))
     print("Number of isoforms in input: " + str(initial_number_of_isoforms))
+    print("Number of case samples: " + str(len(cases)))
+    print("Number of control samples: " + str(len(controls)))
 
-    ## sum up abundance values from all isoforms belonging to a gene to get the gene expression (method isoformToGeneExp) (needed for calculating IF)
+    # ISOFORM REPORT
 
-    if not quiet:
-        print('Step 2 of 6: Calculating gene expression...')
+    iso_report = isoform_report(abundance, conditionMatrix, dis_ease, **kwargs)
 
-    geneRepExpression = abundance.groupby(by="gene_id", axis=0).sum()
+    if method == "isa":
+        switch_report = detect_iswitches_isa(iso_report, dis_ease, quiet, **kwargs)
 
-    geneRepExpression.reset_index(inplace=True)
+    elif method == "spada":
+        switch_report = detect_iswitches_spada(cases, controls, needed_samples, data, dis_ease, quiet, **kwargs)
 
-    ## which conditions need to be compared, how many replicates are present for each condition
+    else:
+        print("Please specify the method to use: Either 'isa' or 'spada'.")
+        switch_report = None
 
-    conditions = conditionMatrix.groupby(by="condition", axis=0).count()
+    # GENE REPORT
 
-    conditions.reset_index(inplace=True)
+    g_report = gene_report(method, iso_report, dis_ease, quiet)
 
-    conditions.columns = ["condition", "nrReplicates"]
+    return iso_report, switch_report, g_report
 
-    conditions1 = list(conditions.condition)
 
-    conditions2 = conditions1.copy()
+def detect_iswitches_spada(cases, controls, needed_samples, data, dis_ease, quiet, signif_threshold=0.3):
+    """ detect isoform switches with SPADA
 
-    comparisonsToMake = pd.DataFrame()
+    Parameters
+    ------------
+    cases: Data.Frame
+        List of sample ids from cancer tissue in column sampleID and condition name in column "condition".
+    controls: Data.Frame
+        List of sample ids from healthy tissue in column "sampleID" and condition name in column "condition.
+    needed_samples: list
+        List of samples for which count data is provided in data.
+    data: String
+        Tab separated table where the columns represent the samples (same sample ids as in pheno) and the rows represent the isoforms (same ids as in annotation_file).
+    dis_ease: String
+        The primary disease you are interested in, spearated by "_".
+    quiet: boold (default: False)
+        whether to suppress status messages
+    signif_threshold: float
+        minimum fraction of samples
 
-    for t1 in conditions1:
+    """
 
-        conditions2.remove(t1)
+    ## get case and control sample ids for the given cancer type
 
-        for t2 in conditions2:
-            comparisonsToMake = comparisonsToMake.append(
-                pd.DataFrame([[t1, t2]], columns=["condition_1", "condition_2"]), ignore_index=False)
+    needed_cases = [x for x in cases.sampleID if x in needed_samples]
+    needed_controls = [x for x in controls.sampleID if x in needed_samples]
 
-    ## for each gene / isoform in each condition the mean expression and standard error (of mean (measurement), s.e.m.) expression are calculated
+    # check wheter spada expression input needs to be created from tpm matrix
+    if not os.path.isfile(dis_ease + '_Case.tsv') or not os.path.isfile(dis_ease + '_Control.tsv'):
 
-    conditionList = [conditionMatrix[conditionMatrix.condition == x] for x in conditions.condition]
+        # read needed columns (samples) from tpm file
+        abundance = pd.read_csv(data, sep="\t", compression="gzip", usecols=lambda x: x in set(["sample"] + needed_samples), index_col=0)
 
-    conditionSummary = dict()
-
-    for sampleVec in conditionList:
-        isoSummary = pd.DataFrame({"gene_id": abundance.gene_id, "isoform_id": abundance.isoform_id,
-                                   "iso_value": abundance[sampleVec.sampleID].mean(axis=1),
-                                   "iso_stderr": abundance[sampleVec.sampleID].std(axis=1).divide(
-                                       math.sqrt(len(sampleVec.condition)))})
-
-        geneSummary = pd.DataFrame(
-            {"gene_id": geneRepExpression.gene_id, "gene_value": geneRepExpression[sampleVec.sampleID].mean(axis=1),
-             "gene_stderr": geneRepExpression[sampleVec.sampleID].std(axis=1).divide(
-                 math.sqrt(len(sampleVec.condition)))})
-
-        combinedData = pd.merge(isoSummary, geneSummary, how="outer", on="gene_id")
-
-        conditionSummary[sampleVec.condition.unique()[0]] = combinedData
-
-    ## for each pairwise comparison of condition (or as controlled by the comparisonsToMake argument) the mean gene and isoform expression values are then used to calculate log2fc and IF
-
-    if not quiet:
-        print('Step 3 of 6: Making comparisons...')
-
-    isoAnnot = pd.DataFrame()
-
-    for comp in comparisonsToMake.iterrows():
-        cond1data = conditionSummary[comp[1][0]]
-
-        cond2data = conditionSummary[comp[1][1]]
-
-        verticalCombined = pd.merge(cond1data, cond2data, how="inner", on=["gene_id", "isoform_id"],
-                                    suffixes=["_1", "_2"])
-
-        verticalCombined["condition_1"] = comp[1][0]
-
-        verticalCombined["condition_2"] = comp[1][1]
-
-        isoAnnot = isoAnnot.append(verticalCombined)
-
-    ## add comparison data
+        # create input files for spada
+        case_expr = 2 ** abundance.loc[:, needed_cases] - 0.001
+        case_expr.to_csv(dis_ease + '_Case.tsv', sep='\t')
+        control_expr = 2 ** abundance.loc[:, needed_controls] - 0.001
+        control_expr.to_csv(dis_ease + '_Control.tsv', sep='\t')
 
     if not quiet:
-        print('Step 4 of 6: Calculating DIF ...')
+        print("Starting SPADA run ...")
 
-    # log2FC
+    # run spada (script spada is in cwd, package spada needs to be installed
+    os.system('python spada switches --expression-control ' + dis_ease + '_Control.tsv '
+                                                                         '--expression-case ' + dis_ease + '_Case.tsv')
 
-    ps = foldChangePseudoCount
+    # read spada ouput, reformat for further usage:
+    spada_out = pd.read_csv("switches_spada.tsv", sep="\t")
 
-    isoAnnot["iso_log2_fc"] = np.log2((isoAnnot["iso_value_2"] + ps) / (isoAnnot["iso_value_1"] + ps))
+    if not quiet:
+        print("CREATING SPADA SWITCH REPORT")
 
-    isoAnnot["gene_log2_fc"] = np.log2((isoAnnot["gene_value_2"] + ps) / (isoAnnot["gene_value_1"] + ps))
+    # calculate whether significant
+    spada_out["frac"] = None
+    switch_dict = {}
+    for index, row in spada_out.iterrows():
+        sams = spada_out.at[index, 'Samples'].split(',')
+        symb = spada_out.at[index, 'Symbol']
+        ca = spada_out.at[index, 'Case_transcript']
+        co = spada_out.at[index, 'Control_transcript']
+        nbsams = len(sams)
+        frac = nbsams / len(needed_cases)
+        # fill frac column with correct fraction of supporting samples
+        spada_out['frac'][index] = frac
+        key = symb + '/' + co + '-' + ca
+        switch_dict[key] = frac
 
-    # qvalues
+    # filter df to only significant switches
+    # and write to tsv file again
+    significant = spada_out['frac'] >= signif_threshold
+    signSwitches = spada_out[significant]
+    signSwitches.to_csv(dis_ease + '_significantSwitches_spada.tsv', sep='\t', index=False)
 
-    isoAnnot["iso_q_value"] = None
+    switch_report = signSwitches[["Symbol", "Case_transcript", "Control_transcript"]]
+    switch_report.columns = ["gene_id", "case_transcript", "control_transcript"]
+    switch_report.to_csv(dis_ease + "_SWITCH_REPORT_spada.tsv", sep="\t")
 
-    isoAnnot["gene_q_value"] = None
+    return switch_report
 
-    # isoform fraction values
 
-    isoAnnot["IF1"] = np.round(isoAnnot["iso_value_1"] / isoAnnot["gene_value_1"], decimals=4)
+def detect_iswitches_isa(myDiffData, disease, quiet, dIFcutoff=0.1, alpha=0.05):
+    """ detect isoform switches with a python reimplementation of the IsoformSwitchAnalyzeR
 
-    isoAnnot["IF2"] = np.round(isoAnnot["iso_value_2"] / isoAnnot["gene_value_2"], decimals=4)
+    Parameters
+    -------------
+    myDiffData: Data.Frame
+        Table with statistics for each isoforms, of which an alternative isoforms is expressed. (output of isoform_report())
+    disease: String
+        The primary disease you are interested in.
+    data. String
+        Tab separated table where the columns represent the samples (same sample ids as in pheno) and the rows represent the isoforms (same ids as in annotation_file).
+    quiet: boold (default: False)
+        whether to suppress status messages
+    dIFcutoff: float (default: 0.1)
+        cutoff for the dIF
+    alpha: float (default: 0.05)
+        cutoff for isoform switch q-value
 
-    isoAnnot["dIF"] = isoAnnot["IF2"] - isoAnnot["IF1"]
+    """
 
-    # switch values
-
-    isoAnnot["isoform_switch_q_value"] = None
-
-    isoAnnot["gene_switch_q_value"] = None
+    if not quiet:
+        print("Starting ISA run ...")
 
     ### Part 2: from dIF to p-value to q-value
     #################################################################################################################################
 
     # Adapted from Isoform Switch Analyzer version 0.99 (function IsoformSwitchTest)
     # https://github.com/kvittingseerup/IsoformSwitchAnalyzeR/blob/a31694e8be21602a559d14f3b392e6235ccb7e45/R/test_isoform_switches.R
-
-    ## filtering for eligible data
-
-    myDiffData = isoAnnot
-
-    if not quiet:
-        print('Step 5 of 6: Filtering for eligible data...')
-
-    ## extract genes with multiple isoforms
-
-    # get unique gene - isoform pairs
-    geneIsoOverview = myDiffData[["isoform_id", "gene_id"]].drop_duplicates()
-
-    # count isoforms per gene
-    iso_counter = Counter(geneIsoOverview["gene_id"])
-
-    # select genes with at least 2 isoforms
-    genes_of_interest = [x for x in myDiffData["gene_id"] if iso_counter[x] > 1]
-
-    # reduce data to selected isoforms
-    myDiffData = myDiffData.loc[myDiffData["gene_id"].isin(genes_of_interest)]
-
-    ## calculations
-
-    # add replicate number
-
-    myDiffData["nrReplicates_1"] = [conditions["nrReplicates"][conditions["condition"] == x].values[0] for x in
-                                    myDiffData["condition_1"]]
-
-    myDiffData["nrReplicates_2"] = [conditions["nrReplicates"][conditions["condition"] == x].values[0] for x in
-                                    myDiffData["condition_2"]]
 
     ## statistical calculations
 
@@ -509,15 +320,12 @@ def detect_iswitches_isa(pheno, data, disease, anno, dIFcutoff=0.1, alpha=0.05, 
     ## Do statistical test of IF differences
 
     if not quiet:
-        print('Step 6 of 6: Testing isoform usage')
-
-    # split in comparisonss (since different comparisons might have different numbers of replicates)
-
-    comparisons = myDiffData2[["condition_1", "condition_2"]].drop_duplicates()
+        print('Testing isoform usage')
 
     # wrange data to get all comparisons to make
     myDiffData2List = {}
 
+    # split in comparisonss (since different comparisons might have different numbers of replicates)
     comparisons = myDiffData2[["condition_1", "condition_2"]].drop_duplicates().transpose()
 
     n = 0
@@ -592,7 +400,7 @@ def detect_iswitches_isa(pheno, data, disease, anno, dIFcutoff=0.1, alpha=0.05, 
 
     gene_ref = switches[["gene_id", "condition_1", "condition_2"]].drop_duplicates()
 
-    switch_pairs = pd.DataFrame()
+    switch_report = pd.DataFrame()
 
     for idx in gene_ref.index:
 
@@ -610,21 +418,21 @@ def detect_iswitches_isa(pheno, data, disease, anno, dIFcutoff=0.1, alpha=0.05, 
 
         # get pairs of one up- and one downregulated isoform, where at least one of them is significant
         paired_ids = [(u, d) for u in ups for d in downs if
-                      ((u in set(signif_switches.isoform_id)) | (d in set(signif_switches.isoform_id)))]
+                      ((u in set(signif_switches)) | (d in set(signif_switches)))]
 
         # hardcoded conditions: condition_1 = case, condition_2 = control
         for pair in paired_ids:
             # produce list in the format needed for visualization
-            iso_pair = pd.DataFrame({"GeneId": [g_id], "Control_transcipt": [pair[0]], "Case_transcript": [pair[1]]})
-            switch_pairs = switch_pairs.append(iso_pair)
+            iso_pair = pd.DataFrame({"gene_id": [g_id], "control_transcript": [pair[0]], "case_transcript": [pair[1]]})
+            switch_report = switch_report.append(iso_pair)
 
     # write file
-    switch_pairs.to_csv(disease.replace(" ", "-") + "_" + "isoformSwitchAnalyzePy.tsv", sep="\t", index=False)
+    switch_report.to_csv(disease + "_SWITCH_REPORT_isa.tsv", sep="\t", index=False)
 
     # # Part 4: Summarize and visualize output
-    summarize_iswitches(switches, switch_pairs, alpha, dIFcutoff)
+    # summarize_iswitches(switches, switch_pairs, alpha, dIFcutoff)
 
-    return switches, switch_pairs
+    return switch_report
 
 
 ### Part 4: Summarize and visualize output 
@@ -638,54 +446,18 @@ def detect_iswitches_isa(pheno, data, disease, anno, dIFcutoff=0.1, alpha=0.05, 
 #    isa_light = '#9a9aff'
 #    isa_dark = "#4d4dff"
 
-def summarize_iswitches(switches, switch_pairs, alpha, dIFcutoff):
-    # all isoforms with a significant change in isoform usage
-    signif_switches = switches[(switches.isoform_switch_q_value < alpha) & (abs(switches.dIF) > dIFcutoff)].isoform_id
+
+def summarize_iswitches(iso_report, switch_report):
 
     ## print some basic summary statistics:
     print("Isoform Switch Summary\n------------------------------\n")
-    print("Number of switches: " + str(len(switch_pairs)))
-    print("Number of genes: " + str(len(switch_pairs.GeneId.drop_duplicates())) + " (" + str(
-        len(switches.gene_id.drop_duplicates())) + ")")
-    print("Number of significant isoforms: " + str(len(signif_switches.drop_duplicates())))  # 197044
-    tabl = switch_pairs.GeneId.value_counts().value_counts().sort_index()
+    print("Number of switches: " + str(len(switch_report)))
+    print("Number of genes involved in switches: " + str(len(switch_report.gene_id.drop_duplicates())) + " (" + str(
+        len(iso_report.gene_id.drop_duplicates())) + ")")
+    print("Number of isoforms involved in switches: " + str(len(iso_report.isoform_id.drop_duplicates())))
+    tabl = switch_report.gene_id.value_counts().value_counts().sort_index()
     print("Number of switches per gene:")
     print(pd.DataFrame({"#switches": tabl.index, "count": tabl.values}))
-
-    ## plot the number of isoforms per gene
-    plt.rcParams['figure.figsize'] = [6, 2]
-    fig, ax = plt.subplots()
-    signif_isoform_count = switches[switches.isoform_id.isin(signif_switches)].gene_id.value_counts().value_counts()
-    plt.bar(signif_isoform_count.index, signif_isoform_count.values, color="red", label="significant")  # , alpha = 0.5)
-    plt.bar(switches.gene_id.value_counts().value_counts().index, switches.gene_id.value_counts().value_counts().values,
-            color="black", alpha=0.5, label="not significant")
-    my_xticks = [1, 2, 3, 4] + list(range(10, 61, 10))
-    plt.xticks(my_xticks)  # color = "red")
-    plt.xlabel("isoform count")
-    plt.ylabel("gene count")
-    plt.title("Number of Isoforms per Gene")
-    plt.legend()
-    plt.savefig("ISA_isoforms_per_gene.png")
-
-    ## plot the distibution of the corrected p-value
-    fig, ax = plt.subplots()
-    plt.plot(range(len(switches)), switches.isoform_switch_q_value.sort_values())
-    plt.axhline(alpha, color="red")
-    plt.ylabel("p_adj")
-    plt.title("Isoform Switch adjusted p-value Distribution")
-    plt.xlabel("transcripts")
-    plt.xticks([], [])
-    plt.savefig("ISA_pvalue_distribution.png")
-
-    ## plot the distribution of the dIF
-    fig, ax = plt.subplots()
-    plt.plot(range(len(switches)), switches.dIF.sort_values())
-    plt.axhline(dIFcutoff, color="red")
-    plt.ylabel("dIF")
-    plt.title("dIF Distribution")
-    plt.xlabel("transcripts")
-    plt.xticks([], [])
-    plt.savefig("ISA_dIF_distribution.png")
 
 
 ## plot example genes
@@ -792,7 +564,7 @@ def enrichment(switch_pairs):
             mind = mind - 1
 
         drange = maxd - mind
-        return ((((data - mind) / drange * 0.70) + 0.05) * 100)
+        return (((data - mind) / drange * 0.70) + 0.05) * 100
 
     def plot_enrich(data, n_terms=10):
         # Test data input
@@ -1007,39 +779,15 @@ def draw_protein_graph(complex_name, switch_df, prot_complex_table, prot_complex
 # detect_iswitches(method="spada")
 
 
-def isoform_report(method, abundance, anno, conditionMatrix, disease="kidney_clear_cell_carcinoma", foldChangePseudoCount=0.001, quiet=True):
+def isoform_report(abundance, conditionMatrix, disease, foldChangePseudoCount=0.001, quiet=False):
 
     if not quiet:
         print("CREATING ISOFORM REPORT")
-        print('Step 1 of 6: Obtaining annotation...')
-
-    # read file
-    annotation = pd.read_csv(anno, sep="\t")
-
-    # select columns
-    annotation = annotation[["id", "gene"]]
-
-    # rename columns
-    annotation.columns = ["isoform_id", "gene_id"]
-
-    # add gene id to abundance matrix
-    abundance = abundance.merge(annotation, how='left', on="isoform_id")
-    # attention ! NANs !!!
-
-    # add gene id to abundance matrix
-    abundance = abundance.merge(annotation, how='left', on="isoform_id")
-    # attention ! NANs !!!
-
-    # print information about the given data
-    initial_number_of_genes = len(abundance.gene_id.drop_duplicates())
-    initial_number_of_isoforms = len(abundance.isoform_id)
-    print("Number of genes in input: " + str(initial_number_of_genes))
-    print("Number of isoforms in input: " + str(initial_number_of_isoforms))
 
     ## sum up abundance values from all isoforms belonging to a gene to get the gene expression (method isoformToGeneExp) (needed for calculating IF)
 
     if not quiet:
-        print('Step 2 of 6: Calculating gene expression...')
+        print('Calculating gene expression...')
 
     geneRepExpression = abundance.groupby(by="gene_id", axis=0).sum()
 
@@ -1091,7 +839,7 @@ def isoform_report(method, abundance, anno, conditionMatrix, disease="kidney_cle
     ## for each pairwise comparison of condition (or as controlled by the comparisonsToMake argument) the mean gene and isoform expression values are then used to calculate log2fc and IF
 
     if not quiet:
-        print('Step 3 of 6: Making comparisons...')
+        print('Making comparisons...')
 
     isoAnnot = pd.DataFrame()
 
@@ -1112,7 +860,7 @@ def isoform_report(method, abundance, anno, conditionMatrix, disease="kidney_cle
     ## add comparison data
 
     if not quiet:
-        print('Step 4 of 6: Calculating DIF ...')
+        print('Calculating DIF ...')
 
     # log2FC
 
@@ -1133,7 +881,7 @@ def isoform_report(method, abundance, anno, conditionMatrix, disease="kidney_cle
     ## filtering for eligible data
 
     if not quiet:
-        print('Step 5 of 6: Filtering for eligible data...')
+        print('Filtering for eligible data...')
 
     ## extract genes with multiple isoforms
 
@@ -1152,7 +900,7 @@ def isoform_report(method, abundance, anno, conditionMatrix, disease="kidney_cle
     ## calculations
 
     if not quiet:
-        print('Step 6 of 6: Adding switch information...')
+        print('Adding switch information...')
 
     # add replicate number
 
@@ -1165,38 +913,57 @@ def isoform_report(method, abundance, anno, conditionMatrix, disease="kidney_cle
     isoAnnot["switchDirection"] = ["up" if x > 0 else "down" for x in isoAnnot.dIF]
 
     # write ISOFORM REPORT:
-    isoAnnot.to_csv(disease + "ISOFORM_REPORT_" + method + ".tsv", sep="\t")
+    isoAnnot.to_csv(disease + "_ISOFORM_REPORT" + ".tsv", sep="\t")
 
     return isoAnnot
+
+
+def gene_report(method, iso_report, dis_ease, quiet):
+
+    # CREATE GENE REPORT
+
+    if not quiet:
+        print("CREATING " + method.upper() + " GENE REPORT")
+
+    g_report = iso_report["gene_id"].value_counts().rename_axis('gene_id').reset_index(name='switch_count')
+
+    g_report.to_csv(dis_ease + "_GENE_REPORT_" + method + ".tsv", sep="\t")
+
+    return g_report
 
 
 # switches, switch_pairs = detect_iswitches(method="spada", disease="breast invasive carcinoma")
 
 # example_plot_switches("ABCF3", switch_pairs, switches)
 
-switches, switch_pairs = detect_iswitches(method="spada", disease="breast invasive carcinoma")
+# iso_report, switch_report, g_report = detect_iswitches(method="spada", disease="breast invasive carcinoma")
 
 
-#TODO##########################################################################################################################
-#TODO##########################################################################################################################
+# TODO##########################################################################################################################
+# TODO##########################################################################################################################
 
-#TODO rename this python file
+# TODO domain level output
 
-#TODO outputs:
+# TODO check whether **kwargs are working
+
 """
+####################################
+OUTPUTS:
+#####################################
+
 - ISOFORM_REPORT: 
 existing for spada: NO --> do it like for isa
 existing for isa: breast_invasive_carcinoma_significantSwitches (früher switches.csv):
     gene_id,isoform_id,iso_value_1,iso_stderr_1,gene_value_1,gene_stderr_1,iso_value_2,iso_stderr_2,gene_value_2,gene_stderr_2,condition_1,condition_2,iso_log2_fc,gene_log2_fc,iso_q_value,gene_q_value,IF1,IF2,dIF,isoform_switch_q_value,gene_switch_q_value,nrReplicates_1,nrReplicates_2,gene_cv1,gene_lower_CI_1,gene_lower_CI_2,gene_var_1,gene_var_2,iso_var_1,iso_var_2,IF_var_1,IF_var_2,dIF_std_err,t_statistics,deg_free,p_value
 min cols: 
     isoform_id,gene_id,condition_1,condition_2,IF1,IF2,dIF oder besser IF_case,IF_control ? 
---> for every isoform --> equal number of lines for both methods
+--> for every isoform that has at least one alternative isoform --> equal number of lines for both methods --> also equal values
 
 - GENE_REPORT.tsv 
 existing for spada: geneReport.tsv
     Gene    Symbol  Number-of-switches
 not existing for isa, see summary
---> for every gene --> equal number of lines for both methods
+--> for every gene --> equal number of lines for both methods --> but different values
 
 - SWITCH_REPORT: 
 existing for spada: significantSwitches / switches_spada
@@ -1206,7 +973,6 @@ existing for isa: switch_pairs kidney-clear-cell-carcinoma_isoformSwitchAnalyzeP
 --> diverging number of lines for each method
 
 - DOMAIN_REPORT:
-
 --> diverging number of lines for each method
 
 """

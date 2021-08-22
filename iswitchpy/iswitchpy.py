@@ -1,4 +1,3 @@
-import csv
 import math
 import os
 from collections import Counter
@@ -16,6 +15,7 @@ from matplotlib import colors
 from matplotlib import rcParams
 from scipy.stats import t
 from statsmodels.stats.multitest import fdrcorrection
+from scipy import stats
 
 
 # from pyvis.network import Network
@@ -27,12 +27,18 @@ from statsmodels.stats.multitest import fdrcorrection
 
 # Decection of isoform switches
 
-def detect_iswitches(method="isa",
-                     pheno="data/TCGA_phenotype_denseDataOnlyDownload.tsv.gz",
-                     data="data/tcga_Kallisto_tpm.gz",
-                     disease="kidney-clear-cell-carcinoma",
-                     anno="data//gencode.v23.annotation.transcript.probemap",
+def detect_iswitches(
+                     pheno,  # "data/TCGA_phenotype_denseDataOnlyDownload.tsv.gz"
+                     data,  # "data/tcga_Kallisto_tpm.gz"
+                     disease,  # "kidney-clear-cell-carcinoma", 'breast-invasive-carcinoma'
+                     anno,  # "data/gencode.v23.annotation.transcript.probemap"
+                     method="isa",
+                     iswitch_pval="iswitchpy",
+                     abundance_file=None,
+                     conditionMatrix_file=None,
                      quiet=False,
+                     paired=False,
+                     outpath='',
                      **kwargs):
     """ wrapper for isoforms swtich detection and analysis
 
@@ -48,14 +54,53 @@ def detect_iswitches(method="isa",
         The primary disease you are interested in.
     anno: String
         Tab separated file with the columns "id" and "gene" which give the gene id for each transcript.
+    iswitch_pval: String (default:
+        eather "iswitchpy" or "isar": which method to use for calculation the pvalue
     quiet: boold (default: False)
         whether to suppress status messages
-    *args:
+    *kwargs:
         parameters of the according isoform switch detection methods, eg signif_threshold for isa
     """
 
+    # DATA WRANGLING
+    if abundance_file and conditionMatrix_file and method=="isa":
+        abundance = pd.read_csv(abundance_file, index_col=0)
+        conditionMatrix = pd.read_csv(conditionMatrix_file, index_col=0)
+    else:
+        abundance, conditionMatrix, cases, controls, needed_samples = data_wrangling(pheno, data, disease, anno, quiet)
+
+    disease = disease.replace("-", " ")
+    dis_ease = disease.replace(" ", "_")
+
     if not quiet:
         print("Starting isoform switch detection...")
+
+    # ISOFORM REPORT
+    if iswitch_pval == "iswitchpy":
+        iso_report = isoform_report_paired(abundance, conditionMatrix, dis_ease, outpath=outpath, paired=paired, **kwargs)
+    elif iswitch_pval == "isar":
+        iso_report = isoform_report(abundance, conditionMatrix, dis_ease, outpath=outpath, paired=paired, **kwargs)
+
+    # SWITCH REPORT
+    if method == "isa":
+        switch_report = detect_iswitches_isa(iso_report, dis_ease, quiet, outpath, **kwargs)
+    elif method == "spada":
+        switch_report = detect_iswitches_spada(cases, controls, needed_samples, data, dis_ease, quiet, outpath, **kwargs)
+    else:
+        print("Please specify the method to use: Either 'isa' or 'spada'.")
+        switch_report = None
+
+    # GENE REPORT
+    g_report = gene_report(method, iso_report, dis_ease,  outpath=outpath, quiet=quiet)
+
+    return iso_report, switch_report, g_report
+
+
+def data_wrangling(pheno="data/TCGA_phenotype_denseDataOnlyDownload.tsv.gz",
+                   data="data/tcga_Kallisto_tpm.gz",
+                   disease='breast-invasive-carcinoma',  # "kidney-clear-cell-carcinoma",
+                   anno="data//gencode.v23.annotation.transcript.probemap",
+                   quiet=False):
 
     ### Part 0: read files
     ######################################
@@ -132,28 +177,10 @@ def detect_iswitches(method="isa",
     print("Number of case samples: " + str(len(cases)))
     print("Number of control samples: " + str(len(controls)))
 
-    # ISOFORM REPORT
-
-    iso_report = isoform_report(abundance, conditionMatrix, dis_ease, **kwargs)
-
-    if method == "isa":
-        switch_report = detect_iswitches_isa(iso_report, dis_ease, quiet, **kwargs)
-
-    elif method == "spada":
-        switch_report = detect_iswitches_spada(cases, controls, needed_samples, data, dis_ease, quiet, **kwargs)
-
-    else:
-        print("Please specify the method to use: Either 'isa' or 'spada'.")
-        switch_report = None
-
-    # GENE REPORT
-
-    g_report = gene_report(method, iso_report, dis_ease, quiet)
-
-    return iso_report, switch_report, g_report
+    return abundance, conditionMatrix, cases, controls, needed_samples
 
 
-def detect_iswitches_spada(cases, controls, needed_samples, data, dis_ease, quiet, signif_threshold=0.3):
+def detect_iswitches_spada(cases, controls, needed_samples, data, dis_ease, quiet, outpath, signif_threshold=0.3):
     """ detect isoform switches with SPADA
 
     Parameters
@@ -188,9 +215,9 @@ def detect_iswitches_spada(cases, controls, needed_samples, data, dis_ease, quie
 
         # create input files for spada
         case_expr = 2 ** abundance.loc[:, needed_cases] - 0.001
-        case_expr.to_csv(dis_ease + '_Case.tsv', sep='\t')
+        case_expr.to_csv(outpath + dis_ease + '_Case.tsv', sep='\t')
         control_expr = 2 ** abundance.loc[:, needed_controls] - 0.001
-        control_expr.to_csv(dis_ease + '_Control.tsv', sep='\t')
+        control_expr.to_csv(outpath + dis_ease + '_Control.tsv', sep='\t')
 
     if not quiet:
         print("Starting SPADA run ...")
@@ -224,16 +251,16 @@ def detect_iswitches_spada(cases, controls, needed_samples, data, dis_ease, quie
     # and write to tsv file again
     significant = spada_out['frac'] >= signif_threshold
     signSwitches = spada_out[significant]
-    signSwitches.to_csv(dis_ease + '_significantSwitches_spada.tsv', sep='\t', index=False)
+    signSwitches.to_csv(outpath + dis_ease + '_significantSwitches_spada.tsv', sep='\t', index=False)
 
     switch_report = signSwitches[["Symbol", "Case_transcript", "Control_transcript"]]
     switch_report.columns = ["gene_id", "case_transcript", "control_transcript"]
-    switch_report.to_csv(dis_ease + "_SWITCH_REPORT_spada.tsv", sep="\t")
+    switch_report.to_csv(outpath + dis_ease + "_SWITCH_REPORT_spada.tsv", sep="\t")
 
     return switch_report
 
 
-def detect_iswitches_isa(myDiffData, disease, quiet, dIFcutoff=0.1, alpha=0.05):
+def detect_iswitches_isa(switches, disease, quiet, outpath, dIFcutoff=0.1, alpha=0.05):
     """ detect isoform switches with a python reimplementation of the IsoformSwitchAnalyzeR
 
     Parameters
@@ -250,6 +277,8 @@ def detect_iswitches_isa(myDiffData, disease, quiet, dIFcutoff=0.1, alpha=0.05):
         cutoff for the dIF
     alpha: float (default: 0.05)
         cutoff for isoform switch q-value
+    paired: Boolean (default: True)
+        whether the samples are paired. If True, each line in the
 
     """
 
@@ -264,137 +293,142 @@ def detect_iswitches_isa(myDiffData, disease, quiet, dIFcutoff=0.1, alpha=0.05):
 
     ## statistical calculations
 
-    # critical value
-    myDiffData["gene_cv1"] = myDiffData["gene_stderr_1"] * myDiffData["nrReplicates_1"] ** (1 / 2) / myDiffData[
-        "gene_value_1"]
-
-    # confidence level
-    ci = 0.95  # hardcoded since this is not subject to change
-
-    # confidence interval
-    myDiffData["gene_lower_CI_1"] = myDiffData["gene_value_1"] - myDiffData["gene_stderr_1"] * [
-        t.ppf(ci / 2 + 0.5, myDiffData["nrReplicates_1"].values[x] - 1) for x in range(0, len(myDiffData))]
-
-    myDiffData["gene_lower_CI_2"] = myDiffData["gene_value_2"] - myDiffData["gene_stderr_2"] * [
-        t.ppf(ci / 2 + 0.5, myDiffData["nrReplicates_2"].values[x] - 1) for x in range(0, len(myDiffData))]
-
-    # filter on CV and CI - this is nesseary for the implemnted version of Fieller's theorem
-
-    myDiffData2 = myDiffData[
-        [((myDiffData["gene_lower_CI_1"].values[x] > 0) & (myDiffData["gene_lower_CI_2"].values[x] > 0)) for x in
-         range(0, len(myDiffData))]]
-
-    myDiffData2 = myDiffData2[[((myDiffData2["gene_stderr_1"].values[x] * myDiffData2["nrReplicates_1"].values[x] ** (
-                1 / 2) < myDiffData2["gene_value_1"].values[x] / 2) & (myDiffData2["gene_stderr_2"].values[x] *
-                                                                       myDiffData2["nrReplicates_2"].values[x] ** (
-                                                                                   1 / 2) <
-                                                                       myDiffData2["gene_value_2"].values[x] / 2)) for x
-                               in range(0, len(myDiffData2))]]
-
-    # calculate expression variance
-
-    myDiffData2["gene_var_1"] = (myDiffData2["gene_stderr_1"] * myDiffData2["nrReplicates_1"] ** (1 / 2)) ** 2
-
-    myDiffData2["gene_var_2"] = (myDiffData2["gene_stderr_2"] * myDiffData2["nrReplicates_2"] ** (1 / 2)) ** 2
-
-    myDiffData2["iso_var_1"] = (myDiffData2["iso_stderr_1"] * myDiffData2["nrReplicates_1"] ** (1 / 2)) ** 2
-
-    myDiffData2["iso_var_2"] = (myDiffData2["iso_stderr_2"] * myDiffData2["nrReplicates_2"] ** (1 / 2)) ** 2
-
-    # calculate var of isoform fraction
-
-    myDiffData2["IF_var_1"] = (1 / myDiffData2["gene_value_1"] ** 2) * (
-                myDiffData2["iso_var_1"] + (myDiffData2["IF1"] ** 2 * myDiffData2["gene_var_1"]) - (
-                    2 * myDiffData2["IF1"] * myDiffData2["iso_var_1"]))
-
-    myDiffData2["IF_var_2"] = (1 / myDiffData2["gene_value_2"] ** 2) * (
-                myDiffData2["iso_var_2"] + (myDiffData2["IF2"] ** 2 * myDiffData2["gene_var_2"]) - (
-                    2 * myDiffData2["IF2"] * myDiffData2["iso_var_2"]))
-
-    # filter by var of IF
-
-    myDiffData2 = myDiffData2[
-        [((myDiffData2["IF_var_1"].values[x] > 0) & (myDiffData2["IF_var_2"].values[x] > 0)) for x in
-         range(0, len(myDiffData2))]]
-
-    ## Do statistical test of IF differences
-
-    if not quiet:
-        print('Testing isoform usage')
-
-    # wrange data to get all comparisons to make
-    myDiffData2List = {}
-
-    # split in comparisonss (since different comparisons might have different numbers of replicates)
-    comparisons = myDiffData2[["condition_1", "condition_2"]].drop_duplicates().transpose()
-
-    n = 0
-    for i in comparisons:
-        myDiffData2List[n] = myDiffData2[(myDiffData2["condition_1"] == comparisons[i]['condition_1']) & (
-                    myDiffData2["condition_2"] == comparisons[i]['condition_2'])]
-        n = n + 1
-
-    # for each condition, do test
-
-    for x in myDiffData2List:
-        # standard errror of dIF
-        myDiffData2List[x]["dIF_std_err"] = ((myDiffData2List[x]["IF_var_1"] / myDiffData2List[x]["nrReplicates_1"]) + (
-                    myDiffData2List[x]["IF_var_2"] / myDiffData2List[x]["nrReplicates_1"])) ** (1 / 2)
-
-        # test statistic
-        myDiffData2List[x]["t_statistics"] = myDiffData2List[x]["dIF"] / myDiffData2List[x]["dIF_std_err"]
-
-        # degrees of freedom
-        myDiffData2List[x]["deg_free"] = ((myDiffData2List[x]["IF_var_1"] / myDiffData2List[x]["nrReplicates_1"]) + (
-                    myDiffData2List[x]["IF_var_2"] / myDiffData2List[x]["nrReplicates_2"])) ** 2 / (((myDiffData2List[
-                                                                                                          x][
-                                                                                                          "IF_var_1"] ** 2) / (
-                                                                                                                 myDiffData2List[
-                                                                                                                     x][
-                                                                                                                     "nrReplicates_1"] ** 2 * (
-                                                                                                                             myDiffData2List[
-                                                                                                                                 x][
-                                                                                                                                 "nrReplicates_1"] - 1))) + (
-                                                                                                                (
-                                                                                                                            myDiffData2List[
-                                                                                                                                x][
-                                                                                                                                "IF_var_2"] ** 2) / (
-                                                                                                                            myDiffData2List[
-                                                                                                                                x][
-                                                                                                                                "nrReplicates_2"] ** 2 * (
-                                                                                                                                        myDiffData2List[
-                                                                                                                                            x][
-                                                                                                                                            "nrReplicates_2"] - 1))))
-
-        # p-value
-        myDiffData2List[x]["p_value"] = 2 * (1 - t.cdf(abs(myDiffData2List[x]["t_statistics"]), df=myDiffData2List[x][
-            "deg_free"]))  # the 2* to make it two tailed
-
-        # p-value correction
-        myDiffData2List[x]["isoform_switch_q_value"] = fdrcorrection(myDiffData2List[x]["p_value"], method="indep")[1]
-
-    ## write output files
-
-    for i in range(len(myDiffData2List)):
-        myDiffData2List[i].to_csv(disease + "_significantSwitches" + str(i) + "_isa.csv", index=False)
-
-    ### Part 3: Prepare the data for further usage
-    ############################################
-
-    # read results from steps before into one df
-
-    switches = pd.DataFrame()
-    for i in range(len(myDiffData2List)):
-        other = pd.read_csv(disease + "_significantSwitches" + str(i) + "_isa.csv")
-        switches = switches.append(other)
+    # # critical value
+    # myDiffData["gene_cv1"] = myDiffData["gene_stderr_1"] * myDiffData["nrReplicates_1"] ** (1 / 2) / myDiffData[
+    #     "gene_value_1"]
+    #
+    # # confidence level
+    # ci = 0.95  # hardcoded since this is not subject to change
+    #
+    # # confidence interval
+    # myDiffData["gene_lower_CI_1"] = myDiffData["gene_value_1"] - myDiffData["gene_stderr_1"] * [
+    #     t.ppf(ci / 2 + 0.5, myDiffData["nrReplicates_1"].values[x] - 1) for x in range(0, len(myDiffData))]
+    #
+    # myDiffData["gene_lower_CI_2"] = myDiffData["gene_value_2"] - myDiffData["gene_stderr_2"] * [
+    #     t.ppf(ci / 2 + 0.5, myDiffData["nrReplicates_2"].values[x] - 1) for x in range(0, len(myDiffData))]
+    #
+    # # filter on CV and CI - this is nesseary for the implemnted version of Fieller's theorem
+    #
+    # myDiffData2 = myDiffData[
+    #     [((myDiffData["gene_lower_CI_1"].values[x] > 0) & (myDiffData["gene_lower_CI_2"].values[x] > 0)) for x in
+    #      range(0, len(myDiffData))]]
+    #
+    # myDiffData2 = myDiffData2[[((myDiffData2["gene_stderr_1"].values[x] * myDiffData2["nrReplicates_1"].values[x] ** (
+    #             1 / 2) < myDiffData2["gene_value_1"].values[x] / 2) & (myDiffData2["gene_stderr_2"].values[x] *
+    #                                                                    myDiffData2["nrReplicates_2"].values[x] ** (
+    #                                                                                1 / 2) <
+    #                                                                    myDiffData2["gene_value_2"].values[x] / 2)) for x
+    #                            in range(0, len(myDiffData2))]]
+    #
+    # # calculate expression variance
+    #
+    # myDiffData2["gene_var_1"] = (myDiffData2["gene_stderr_1"] * myDiffData2["nrReplicates_1"] ** (1 / 2)) ** 2
+    #
+    # myDiffData2["gene_var_2"] = (myDiffData2["gene_stderr_2"] * myDiffData2["nrReplicates_2"] ** (1 / 2)) ** 2
+    #
+    # myDiffData2["iso_var_1"] = (myDiffData2["iso_stderr_1"] * myDiffData2["nrReplicates_1"] ** (1 / 2)) ** 2
+    #
+    # myDiffData2["iso_var_2"] = (myDiffData2["iso_stderr_2"] * myDiffData2["nrReplicates_2"] ** (1 / 2)) ** 2
+    #
+    # # calculate var of isoform fraction
+    #
+    # myDiffData2["IF_var_1"] = (1 / myDiffData2["gene_value_1"] ** 2) * (
+    #             myDiffData2["iso_var_1"] + (myDiffData2["IF1"] ** 2 * myDiffData2["gene_var_1"]) - (
+    #                 2 * myDiffData2["IF1"] * myDiffData2["iso_var_1"]))
+    #
+    # myDiffData2["IF_var_2"] = (1 / myDiffData2["gene_value_2"] ** 2) * (
+    #             myDiffData2["iso_var_2"] + (myDiffData2["IF2"] ** 2 * myDiffData2["gene_var_2"]) - (
+    #                 2 * myDiffData2["IF2"] * myDiffData2["iso_var_2"]))
+    #
+    # # filter by var of IF
+    #
+    # myDiffData2 = myDiffData2[
+    #     [((myDiffData2["IF_var_1"].values[x] > 0) & (myDiffData2["IF_var_2"].values[x] > 0)) for x in
+    #      range(0, len(myDiffData2))]]
+    #
+    # ## Do statistical test of IF differences
+    #
+    # if not quiet:
+    #     print('Testing isoform usage')
+    #
+    # # wrange data to get all comparisons to make
+    # myDiffData2List = {}
+    #
+    # # split in comparisonss (since different comparisons might have different numbers of replicates)
+    # comparisons = myDiffData2[["condition_1", "condition_2"]].drop_duplicates().transpose()
+    #
+    # n = 0
+    # for i in comparisons:
+    #     myDiffData2List[n] = myDiffData2[(myDiffData2["condition_1"] == comparisons[i]['condition_1']) & (
+    #                 myDiffData2["condition_2"] == comparisons[i]['condition_2'])]
+    #     n = n + 1
+    #
+    # # for each condition, do test
+    #
+    # for x in myDiffData2List:
+        # # standard errror of dIF
+        # myDiffData2List[x]["dIF_std_err"] = ((myDiffData2List[x]["IF_var_1"] / myDiffData2List[x]["nrReplicates_1"]) + (
+        #             myDiffData2List[x]["IF_var_2"] / myDiffData2List[x]["nrReplicates_1"])) ** (1 / 2)
+        #
+        # # test statistic
+        # myDiffData2List[x]["t_statistics"] = myDiffData2List[x]["dIF"] / myDiffData2List[x]["dIF_std_err"]
+        #
+        # # degrees of freedom
+        # myDiffData2List[x]["deg_free"] = ((myDiffData2List[x]["IF_var_1"] / myDiffData2List[x]["nrReplicates_1"]) + (
+        #             myDiffData2List[x]["IF_var_2"] / myDiffData2List[x]["nrReplicates_2"])) ** 2 / (((myDiffData2List[
+        #                                                                                                   x][
+        #                                                                                                   "IF_var_1"] ** 2) / (
+        #                                                                                                          myDiffData2List[
+        #                                                                                                              x][
+        #                                                                                                              "nrReplicates_1"] ** 2 * (
+        #                                                                                                                      myDiffData2List[
+        #                                                                                                                          x][
+        #                                                                                                                          "nrReplicates_1"] - 1))) + (
+        #                                                                                                         (
+        #                                                                                                                     myDiffData2List[
+        #                                                                                                                         x][
+        #                                                                                                                         "IF_var_2"] ** 2) / (
+        #                                                                                                                     myDiffData2List[
+        #                                                                                                                         x][
+        #                                                                                                                         "nrReplicates_2"] ** 2 * (
+        #                                                                                                                                 myDiffData2List[
+        #                                                                                                                                     x][
+        #                                                                                                                                     "nrReplicates_2"] - 1))))
+        #
+        # # p-value
+        # # myDiffData2List["p_value_scipy"] = [stats.ttest_rel(myDiffData2List["iso_value_1"][y], myDiffData2List["iso_value_2"][y])[1] for y in range(len(myDiffData2List))]
+        # # myDiffData2List[x]["p_value_scipy"] = [stats.ttest_rel(myDiffData2List[x]["iso_value_1"][y], myDiffData2List[x]["iso_value_2"][y])[1] for y in range(len(myDiffData2List))]
+        #
+        # myDiffData2List[x]["p_value"] = 2 * (1 - t.cdf(abs(myDiffData2List[x]["t_statistics"]), df=myDiffData2List[x][
+        #     "deg_free"]))  # the 2* to make it two tailed
+    #
+    #     # p-value correction,
+    #
+        # myDiffData2List[x]["isoform_switch_q_value"] = fdrcorrection(myDiffData2List[x]["p_value"], method="indep")[1]
+    #
+    # ## write output files
+    #
+    # for i in range(len(myDiffData2List)):
+    #     myDiffData2List[i].to_csv(outpath + disease + "_significantSwitches" + str(i) + "_isa.csv", index=False)
+    #
+    # ### Part 3: Prepare the data for further usage
+    # ############################################
+    #
+    # # read results from steps before into one df
+    #
+    # switches = pd.DataFrame()
+    # for i in range(len(myDiffData2List)):
+    #     other = pd.read_csv(disease + "_significantSwitches" + str(i) + "_isa.csv")
+    #     switches = switches.append(other)
 
     # significant switches
+
 
     signif_switches = switches[(switches.isoform_switch_q_value < alpha) & (abs(switches.dIF) > dIFcutoff)].isoform_id
 
     # describe the direction of the switch
 
-    switches["switchDirection"] = ["up" if x > 0 else "down" for x in switches.dIF]
+    # switches["switchDirection"] = ["up" if x > 0 else "down" for x in switches.dIF]
 
     # get pairs of isoforms
 
@@ -427,7 +461,7 @@ def detect_iswitches_isa(myDiffData, disease, quiet, dIFcutoff=0.1, alpha=0.05):
             switch_report = switch_report.append(iso_pair)
 
     # write file
-    switch_report.to_csv(disease + "_SWITCH_REPORT_isa.tsv", sep="\t", index=False)
+    switch_report.to_csv(outpath + disease + "_SWITCH_REPORT_isa.tsv", sep="\t", index=False)
 
     # # Part 4: Summarize and visualize output
     # summarize_iswitches(switches, switch_pairs, alpha, dIFcutoff)
@@ -779,7 +813,170 @@ def draw_protein_graph(complex_name, switch_df, prot_complex_table, prot_complex
 # detect_iswitches(method="spada")
 
 
-def isoform_report(abundance, conditionMatrix, disease, foldChangePseudoCount=0.001, quiet=False):
+def isoform_report_paired(abundance, conditionMatrix, disease, outpath, foldChangePseudoCount=0.001, paired=False, quiet=False):
+    """
+    calculating the p-value in a different way than the original IsoformSwitchAnalyzer. Using their cutoffs of p-value and dIF to determine iswitches
+
+    :param outpath:
+    :param abundance:
+    :param conditionMatrix:
+    :param disease:
+    :param foldChangePseudoCount:
+    :param paired:
+    :param quiet:
+    :return:
+    """
+
+    ## which conditions need to be compared, how many replicates are present for each condition
+    # later, conditions are hardcoded!
+
+    conditions = conditionMatrix.groupby(by="condition", axis=0).count()
+
+    conditions.reset_index(inplace=True)
+
+    conditions.columns = ["condition", "nrReplicates"]
+
+    conditions1 = list(conditions.condition)
+
+    conditions2 = conditions1.copy()
+
+
+    iso_reprt = pd.DataFrame()
+
+    if paired:
+
+        # remove condition id from sample id --> sample pairs have same id then
+        conditionMatrix["sampleID_slice"] = conditionMatrix["sampleID"].str.slice(stop=12)
+
+        # restructure condition table so that paired samples are in a row, unpaired samples are dropped
+        conditionMatrixMerged = conditionMatrix[conditionMatrix["condition"] == "case"].merge(
+            conditionMatrix[conditionMatrix["condition"] == "control"], on="sampleID_slice")
+
+        # print info
+        n_sampls = str(len(conditionMatrixMerged))
+        print("Number of sample pairs: " + n_sampls)
+        if n_sampls == 0:
+            print("Maybe your data is unpaired. Try setting paired=False")
+
+        # build list of one table per condition
+        conditionList = [conditionMatrixMerged[["sampleID_x", "condition_x"]],
+                         conditionMatrixMerged[["sampleID_y", "condition_y"]]]
+
+        # change column names back
+        for lis in conditionList:
+            lis.columns = ["sampleID", "condition"]
+
+        # extract count data for both conditions
+        dat_case = abundance[conditionList[0]["sampleID"]]
+        dat_control = abundance[conditionList[1]["sampleID"]]
+
+        # p-value (two sided)
+        n_isos = len(dat_case)  # == len(dat_control because
+        iso_reprt["p_value"] = stats.ttest_rel(dat_case, dat_control, axis=1)[1]
+
+    else:  # unpaired
+
+        # all samples can be used
+
+        # print info
+        print("Number of samples: " + str(len(conditionMatrix)))
+
+        # extract count data for both conditions
+        dat_case = abundance[conditionMatrix[conditionMatrix["condition"] == "case"]["sampleID"]]
+        dat_control = abundance[conditionMatrix[conditionMatrix["condition"] == "control"]["sampleID"]]
+
+        # p-value: Welch t-test (equal var) (two sided)
+        n_isos = len(conditionMatrix)
+        iso_reprt["p_value"] = stats.ttest_ind(dat_case, dat_control, equal_var=False, axis=1)[1]
+
+    iso_reprt["isoform_switch_q_value"] = fdrcorrection(iso_reprt["p_value"], method="indep")[1]
+
+    iso_reprt["isoform_id"] = abundance["isoform_id"]
+    iso_reprt["gene_id"] = abundance["gene_id"]
+
+    if not quiet:
+        print('Calculating DIF ...')
+
+    # iso_value = sample-mean of iso expression
+    iso_reprt["iso_value_1"] = dat_case.mean(axis=1)
+    iso_reprt["iso_value_2"] = dat_control.mean(axis=1)
+    iso_reprt["iso_stderr_1"] = dat_case.std(axis=1).divide(math.sqrt(n_isos))
+    iso_reprt["iso_stderr_2"] = dat_control.std(axis=1).divide(math.sqrt(n_isos))
+
+    # ad gene level statistics
+
+    dat_case["gene_id"] = abundance["gene_id"].copy()
+    dat_control["gene_id"] = abundance["gene_id"].copy()
+    gene_ab_case = dat_case.groupby(by="gene_id", axis=0).sum()
+    gene_ab_control = dat_control.groupby(by="gene_id", axis=0).sum()
+    gene_summary = pd.DataFrame({"gene_value_1": gene_ab_case.mean(axis=1),
+                                 "gene_value_2": gene_ab_control.mean(axis=1),
+                                 "gene_stderr_1": gene_ab_case.std(axis=1).divide(math.sqrt(n_isos)),
+                                 "gene_stderr_2": gene_ab_control.std(axis=1).divide(math.sqrt(n_isos))
+                                 })
+
+    iso_reprt = pd.merge(iso_reprt, gene_summary, how="outer", on="gene_id")
+
+    # log2FC
+
+    ps = foldChangePseudoCount
+
+    iso_reprt["iso_log2_fc"] = np.log2((iso_reprt["iso_value_2"] + ps) / (iso_reprt["iso_value_1"] + ps))
+
+    iso_reprt["gene_log2_fc"] = np.log2((iso_reprt["gene_value_2"] + ps) / (iso_reprt["gene_value_1"] + ps))
+
+    # isoform fraction values
+
+    iso_reprt["IF1"] = np.round(iso_reprt["iso_value_1"] / iso_reprt["gene_value_1"], decimals=4)
+
+    iso_reprt["IF2"] = np.round(iso_reprt["iso_value_2"] / iso_reprt["gene_value_2"], decimals=4)
+
+    iso_reprt["dIF"] = iso_reprt["IF2"] - iso_reprt["IF1"]
+
+    ## filtering for eligible data
+
+    if not quiet:
+        print('Filtering for eligible data...')
+
+    ## extract genes with multiple isoforms
+
+    # get unique gene - isoform pairs
+    geneIsoOverview = iso_reprt[["isoform_id", "gene_id"]].drop_duplicates()
+
+    # count isoforms per gene
+    iso_counter = Counter(geneIsoOverview["gene_id"])
+
+    # select genes with at least 2 isoforms
+    genes_of_interest = [x for x in iso_reprt["gene_id"] if iso_counter[x] > 1]
+
+    # reduce data to selected isoforms
+    iso_reprt = iso_reprt.loc[iso_reprt["gene_id"].isin(genes_of_interest)]
+
+    ## calculations
+
+    if not quiet:
+        print('Adding switch information...')
+
+    # add replicate number
+
+    # hardcoded conditions
+    iso_reprt["condition_1"] = "case"
+    iso_reprt["condition_2"] = "control"
+
+    iso_reprt["nrReplicates_1"] = dat_case.shape[1]
+
+    iso_reprt["nrReplicates_2"] = dat_control.shape[1]
+
+    iso_reprt["switchDirection"] = ["up" if x > 0 else "down" for x in iso_reprt.dIF]
+
+    # write ISOFORM REPORT:
+    iso_reprt.to_csv(outpath + disease + "_ISOFORM_REPORT" + ".tsv", sep="\t")
+
+
+    return iso_reprt
+
+
+def isoform_report(abundance, conditionMatrix, disease, outpath, foldChangePseudoCount=0.001, paired=False, quiet=False):
 
     if not quiet:
         print("CREATING ISOFORM REPORT")
@@ -817,11 +1014,19 @@ def isoform_report(abundance, conditionMatrix, disease, foldChangePseudoCount=0.
 
     ## for each gene / isoform in each condition the mean expression and standard error (of mean (measurement), s.e.m.) expression are calculated
 
+    # if paired:
+    #     # remove condition id from sample id --> sample pairs have same id then
+    #     conditionMatrix["sampleID_slice"] = conditionMatrix["sampleID"].str.slice(stop=12)
+    #     conditionMatrixMerged = conditionMatrix[conditionMatrix["condition"] == "case"].merge(conditionMatrix[conditionMatrix["condition"] == "control"], on="sampleID_slice")
+    #     conditionList = [conditionMatrixMerged[["sampleID_x", "condition_x"]], conditionMatrixMerged[["sampleID_y", "condition_y"]]]
+    #
+    # else:
     conditionList = [conditionMatrix[conditionMatrix.condition == x] for x in conditions.condition]
 
     conditionSummary = dict()
 
     for sampleVec in conditionList:
+        # sampleVec.columns = ["sampleID", "condition"]
         isoSummary = pd.DataFrame({"gene_id": abundance.gene_id, "isoform_id": abundance.isoform_id,
                                    "iso_value": abundance[sampleVec.sampleID].mean(axis=1),
                                    "iso_stderr": abundance[sampleVec.sampleID].std(axis=1).divide(
@@ -913,12 +1118,12 @@ def isoform_report(abundance, conditionMatrix, disease, foldChangePseudoCount=0.
     isoAnnot["switchDirection"] = ["up" if x > 0 else "down" for x in isoAnnot.dIF]
 
     # write ISOFORM REPORT:
-    isoAnnot.to_csv(disease + "_ISOFORM_REPORT" + ".tsv", sep="\t")
+    isoAnnot.to_csv(outpath + disease + "_ISOFORM_REPORT" + ".tsv", sep="\t")
 
     return isoAnnot
 
 
-def gene_report(method, iso_report, dis_ease, quiet):
+def gene_report(method, iso_report, dis_ease, outpath, quiet):
 
     # CREATE GENE REPORT
 
@@ -927,24 +1132,45 @@ def gene_report(method, iso_report, dis_ease, quiet):
 
     g_report = iso_report["gene_id"].value_counts().rename_axis('gene_id').reset_index(name='switch_count')
 
-    g_report.to_csv(dis_ease + "_GENE_REPORT_" + method + ".tsv", sep="\t")
+    g_report.to_csv(outpath + dis_ease + "_GENE_REPORT_" + method + ".tsv", sep="\t")
 
     return g_report
+
+
+def domain_report(biomart_data, isos):
+
+    isos = isos.str.split(".", expand=True)[0]
+    df_filter = biomart_data['Transcript stable ID'].isin(isos)
+    tdata = biomart_data[df_filter]
+    tdata = tdata[tdata["Pfam ID"].notna()].drop_duplicates()
+    try:
+        return tdata["Pfam ID"].unique()
+    except IndexError:
+        return False
+
+
+###################################################################
 
 
 # switches, switch_pairs = detect_iswitches(method="spada", disease="breast invasive carcinoma")
 
 # example_plot_switches("ABCF3", switch_pairs, switches)
 
-# iso_report, switch_report, g_report = detect_iswitches(method="spada", disease="breast invasive carcinoma")
-
+# os.chdir("/big/st/strasserl/iswitch/iswitchpy")
+#
+# abu = "/big/st/strasserl/iswitch/iswitchpy/data_for_isaR/breast_invasive_carcinoma_abundance.csv.gz"
+# condMat = "/big/st/strasserl/iswitch/iswitchpy/data_for_isaR/breast_invasive_carcinoma_conditionMatrix.csv"
+#
+# iso_report, switch_report, g_report = detect_iswitches(method="isa", disease="breast-invasive-carcinoma", abundance_file=abu, conditionMatrix_file=condMat, paired=True, outpath="outpath_breast_paired/")
+# iso_reportu, switch_reportu, g_reportu = detect_iswitches(method="isa", disease="breast-invasive-carcinoma", abundance_file=abu, conditionMatrix_file=condMat, paired=False, outpath="outpath_breast_unpaired/")
+#
+# biomart_path = "/big/st/strasserl/iswitch/iswitchpy/data/biomart_GRCh38_p13.txt"
+# biomart_data = pd.read_table(biomart_path)
+# dom_report = domain_report(biomart_data, iso_report.isoform_id)
 
 # TODO##########################################################################################################################
 # TODO##########################################################################################################################
 
-# TODO domain level output
-
-# TODO check whether **kwargs are working
 
 """
 ####################################
